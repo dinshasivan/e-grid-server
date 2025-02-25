@@ -11,6 +11,7 @@ import (
 )
 
 func main(){
+	
 	db, err := db.Connect()
 
 	if err != nil {
