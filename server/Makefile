@@ -1,5 +1,5 @@
 go run:
-	@go run .
+	go run .
 up:
 	@docker compose up -d
 
