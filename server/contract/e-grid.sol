@@ -1,90 +1,110 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.18;
 
-contract EnergyTrading {
+contract EnergyAuction {
     
+    enum UserType { Producer, Consumer, Prosumer }
+
     struct User {
         string userId;
-        string userType; // Producer, Consumer, Prosumer
-        address walletAddress;
-        uint256 energyBalance; // kWh
-        uint256 availableEnergy; // kWh for trading
-        uint256 tradingLimit; // Max kWh per trade
+        UserType userType;
+        uint256 energyBalance;
     }
 
-    struct Trade {
-        string transactionId;
+    struct Auction {
         address seller;
-        address buyer;
         uint256 energyAmount;
-        uint256 totalCost;
-        uint256 timestamp;
+        uint256 minPrice; // minimum price per kWh
+        address highestBidder; // address of the current highest bidder
+        uint256 highestBid; // current highest bid amount
+        bool active;
+        uint256 endTime;
     }
 
-    mapping(address => User) public users; // map for user
-    mapping(string => Trade) public trades; // map for trade
+    mapping(address => User) public users;
+    mapping(uint256 => Auction) public auctions;
+    uint256 public auctionCount; // total number of auctions created
 
-    event UserRegistered(address indexed wallet, string userId, string userType, uint256 energyBalance, uint256 tradingLimit);
-    event TradeExecuted(string transactionId, address indexed seller, address indexed buyer, uint256 energyAmount, uint256 totalCost, uint256 timestamp);
+    event UserRegistered(address indexed wallet, string userId, UserType userType, uint256 energyBalance);
+    event AuctionCreated(uint256 auctionId, address indexed seller, uint256 energyAmount, uint256 minPrice, uint256 endTime);
+    event BidPlaced(uint256 auctionId, address indexed bidder, uint256 bidAmount);
+    event AuctionEnded(uint256 auctionId, address indexed winner, uint256 winningBid);
 
-    // Register a new user
+    modifier onlyRegistered() {
+        require(bytes(users[msg.sender].userId).length > 0, "User not registered");
+        _;
+    }
+
+    
     function registerUser(
         string memory _userId,
-        string memory _userType,
-        uint256 _energyBalance,
-        uint256 _availableEnergy,
-        uint256 _tradingLimit
+        UserType _userType,
+        uint256 _energyBalance
     ) public {
-        require(users[msg.sender].walletAddress == address(0), "User already registered");
+        require(bytes(users[msg.sender].userId).length == 0, "User already registered");
 
         users[msg.sender] = User({
             userId: _userId,
             userType: _userType,
-            walletAddress: msg.sender,
-            energyBalance: _energyBalance,
-            availableEnergy: _availableEnergy,
-            tradingLimit: _tradingLimit
+            energyBalance: _energyBalance
         });
 
-        emit UserRegistered(msg.sender, _userId, _userType, _energyBalance, _tradingLimit);
+        emit UserRegistered(msg.sender, _userId, _userType, _energyBalance);
     }
 
-    // Execute an energy trade
-    function executeTrade(
-        string memory _transactionId,
-        address _buyer,
-        uint256 _energyAmount,
-        uint256 _totalCost
-    ) public {
-        require(users[msg.sender].walletAddress != address(0), "Seller not registered");
-        require(users[_buyer].walletAddress != address(0), "Buyer not registered");
-        require(users[msg.sender].availableEnergy >= _energyAmount, "Insufficient available energy");
-        require(users[msg.sender].tradingLimit >= _energyAmount, "Exceeds trading limit");
+    
+    function createAuction(uint256 _energyAmount, uint256 _minPrice, uint256 _duration) public onlyRegistered {
+        require(users[msg.sender].energyBalance >= _energyAmount, "Insufficient energy balance");
 
-        // Update balances
-        users[msg.sender].availableEnergy -= _energyAmount;
-        users[_buyer].energyBalance += _energyAmount;
-
-        // Store trade details
-        trades[_transactionId] = Trade({
-            transactionId: _transactionId,
+        auctionCount++;
+        auctions[auctionCount] = Auction({
             seller: msg.sender,
-            buyer: _buyer,
             energyAmount: _energyAmount,
-            totalCost: _totalCost,
-            timestamp: block.timestamp
+            minPrice: _minPrice,
+            highestBidder: address(0),
+            highestBid: 0,
+            active: true,
+            endTime: block.timestamp + _duration
         });
 
-        emit TradeExecuted(_transactionId, msg.sender, _buyer, _energyAmount, _totalCost, block.timestamp);
+        emit AuctionCreated(auctionCount, msg.sender, _energyAmount, _minPrice, block.timestamp + _duration);
     }
 
-    // Get user details
-    function getUser(address _userAddress) public view returns (User memory) {
-        return users[_userAddress];
+    
+    function placeBid(uint256 _auctionId) public payable onlyRegistered {
+        Auction storage auction = auctions[_auctionId];
+        require(auction.active, "Auction is not active");
+        require(block.timestamp < auction.endTime, "Auction has ended");
+        require(msg.value > auction.highestBid && msg.value >= auction.minPrice, "Bid too low");
+
+        // refund previous highest bidder
+        if (auction.highestBidder != address(0)) {
+            payable(auction.highestBidder).transfer(auction.highestBid);
+        }
+
+        auction.highestBidder = msg.sender;
+        auction.highestBid = msg.value;
+
+        emit BidPlaced(_auctionId, msg.sender, msg.value);
     }
 
-    // Get trade details
-    function getTrade(string memory _transactionId) public view returns (Trade memory) {
-        return trades[_transactionId];
+    // auction end and transfer energy
+    function endAuction(uint256 _auctionId) public {
+        Auction storage auction = auctions[_auctionId];
+        require(block.timestamp >= auction.endTime, "Auction not yet ended");
+        require(msg.sender == auction.seller, "Only seller can end auction");
+
+        auction.active = false;
+
+        if (auction.highestBidder != address(0)) {
+            
+            payable(auction.seller).transfer(auction.highestBid);
+
+            // energy from seller and add to winner
+            users[auction.seller].energyBalance -= auction.energyAmount;
+            users[auction.highestBidder].energyBalance += auction.energyAmount;
+
+            emit AuctionEnded(_auctionId, auction.highestBidder, auction.highestBid);
+        }
     }
 }
